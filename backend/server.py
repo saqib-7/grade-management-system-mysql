@@ -3,12 +3,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 from typing import List, Optional
-from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
 import jwt
 from datetime import datetime, timedelta, timezone
 import os
 from uuid import uuid4
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from db_mysql import AsyncSessionLocal, Faculty, FacultyAssignment, Student, StudentEnrollment, Marks, init_db
 
 app = FastAPI()
 
@@ -21,22 +24,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# MongoDB Configuration
-MONGO_URL = os.environ.get('MONGO_URL', 'mongodb://localhost:27017')
-client = AsyncIOMotorClient(MONGO_URL)
-db = client.grade_management_db
-
 # Password hashing
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # JWT Configuration
-SECRET_KEY = "your-secret-key-change-in-production"
+SECRET_KEY = os.environ.get("SECRET_KEY", "your-secret-key-change-in-production")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 
 security = HTTPBearer()
 
-# Pydantic Models
+# Pydantic Models (Kept as-is for API compatibility)
 class Assignment(BaseModel):
     class_name: str
     subject: str
@@ -103,7 +101,10 @@ def create_access_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
-async def get_current_faculty(credentials: HTTPAuthorizationCredentials = Depends(security)):
+async def get_current_faculty(
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    session: AsyncSession = Depends(lambda: AsyncSessionLocal())
+):
     try:
         token = credentials.credentials
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -111,161 +112,78 @@ async def get_current_faculty(credentials: HTTPAuthorizationCredentials = Depend
         if email is None:
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
         
-        faculty = await db.faculties.find_one({"email": email})
-        if faculty is None:
+        # Query faculty by email with assignments
+        result = await session.execute(
+            select(FacultyModel).filter(FacultyModel.email == email)
+        )
+        faculty_obj = result.scalars().first()
+        
+        if faculty_obj is None:
             raise HTTPException(status_code=401, detail="Faculty not found")
         
-        return Faculty(**faculty)
+        # Convert to Pydantic model with nested assignments
+        assignments_list = [
+            Assignment(class_name=a.class_name, subject=a.subject)
+            for a in faculty_obj.assignments
+        ]
+        
+        faculty = Faculty(
+            id=faculty_obj.id,
+            name=faculty_obj.name,
+            email=faculty_obj.email,
+            employee_id=faculty_obj.employee_id,
+            assignments=assignments_list
+        )
+        
+        return faculty
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.JWTError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-# Initialize Sample Data
+# Database session dependency
+async def get_db():
+    async with AsyncSessionLocal() as session:
+        yield session
+
+# Initialize Sample Data (Startup event replacement)
 @app.on_event("startup")
 async def startup_event():
-    # Check if data already exists
-    existing_faculty = await db.faculties.find_one()
-    if existing_faculty:
-        print("Sample data already exists")
-        return
-    
-    print("Initializing sample data...")
-    
-    # Create sample faculties
-    faculties = [
-        {
-            "id": str(uuid4()),
-            "name": "Dr. Rajesh Kumar",
-            "email": "rajesh@university.edu",
-            "employee_id": "FAC001",
-            "password": pwd_context.hash("password123"),
-            "assignments": [
-                {"class_name": "Class 10A", "subject": "Mathematics"},
-                {"class_name": "Class 10B", "subject": "Mathematics"}
-            ]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Dr. Priya Sharma",
-            "email": "priya@university.edu",
-            "employee_id": "FAC002",
-            "password": pwd_context.hash("password123"),
-            "assignments": [
-                {"class_name": "Class 10A", "subject": "Physics"}
-            ]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Prof. Amit Verma",
-            "email": "amit@university.edu",
-            "employee_id": "FAC003",
-            "password": pwd_context.hash("password123"),
-            "assignments": [
-                {"class_name": "Class 10B", "subject": "Chemistry"},
-                {"class_name": "Class 10A", "subject": "Chemistry"}
-            ]
-        }
-    ]
-    await db.faculties.insert_many(faculties)
-    
-    # Create sample students
-    students_10a = [
-        {
-            "id": str(uuid4()),
-            "name": "Aarav Patel",
-            "student_id": "10A001",
-            "class_name": "Class 10A",
-            "enrolled_subjects": ["Mathematics", "Physics", "Chemistry"]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Ananya Singh",
-            "student_id": "10A002",
-            "class_name": "Class 10A",
-            "enrolled_subjects": ["Mathematics", "Physics", "Chemistry"]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Rohan Gupta",
-            "student_id": "10A003",
-            "class_name": "Class 10A",
-            "enrolled_subjects": ["Mathematics", "Physics", "Chemistry"]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Diya Reddy",
-            "student_id": "10A004",
-            "class_name": "Class 10A",
-            "enrolled_subjects": ["Mathematics", "Physics", "Chemistry"]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Arjun Mehta",
-            "student_id": "10A005",
-            "class_name": "Class 10A",
-            "enrolled_subjects": ["Mathematics", "Physics", "Chemistry"]
-        }
-    ]
-    
-    students_10b = [
-        {
-            "id": str(uuid4()),
-            "name": "Kavya Joshi",
-            "student_id": "10B001",
-            "class_name": "Class 10B",
-            "enrolled_subjects": ["Mathematics", "Chemistry"]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Vihaan Desai",
-            "student_id": "10B002",
-            "class_name": "Class 10B",
-            "enrolled_subjects": ["Mathematics", "Chemistry"]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Ishaan Kapoor",
-            "student_id": "10B003",
-            "class_name": "Class 10B",
-            "enrolled_subjects": ["Mathematics", "Chemistry"]
-        },
-        {
-            "id": str(uuid4()),
-            "name": "Saanvi Nair",
-            "student_id": "10B004",
-            "class_name": "Class 10B",
-            "enrolled_subjects": ["Mathematics", "Chemistry"]
-        }
-    ]
-    
-    await db.students.insert_many(students_10a + students_10b)
-    
-    print("Sample data initialized successfully")
-    print("\nSample Faculty Credentials:")
-    print("1. Email: rajesh@university.edu | Password: password123 | Teaches: Math (10A, 10B)")
-    print("2. Email: priya@university.edu | Password: password123 | Teaches: Physics (10A)")
-    print("3. Email: amit@university.edu | Password: password123 | Teaches: Chemistry (10A, 10B)")
+    # This is now handled by database_setup.sql
+    # Tables are created and populated via SQL script
+    print("Application started. Ensure database_setup.sql has been executed.")
 
 # API Endpoints
 @app.post("/api/auth/login", response_model=LoginResponse)
-async def login(request: LoginRequest):
-    faculty = await db.faculties.find_one({"email": request.email})
-    if not faculty:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    if not pwd_context.verify(request.password, faculty["password"]):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
-    
-    token = create_access_token({"sub": faculty["email"]})
-    
-    # Remove password from response
-    faculty.pop("password")
-    
-    return LoginResponse(
-        token=token,
-        faculty=Faculty(**faculty)
+async def login(request: LoginRequest, session: AsyncSession = Depends(get_db)):
+    result = await session.execute(
+        select(FacultyModel).filter(FacultyModel.email == request.email)
     )
+    faculty_obj = result.scalars().first()
+    
+    if not faculty_obj:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    if not pwd_context.verify(request.password, faculty_obj.password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    
+    token = create_access_token({"sub": faculty_obj.email})
+    
+    # Convert to Pydantic model with nested assignments
+    assignments_list = [
+        Assignment(class_name=a.class_name, subject=a.subject)
+        for a in faculty_obj.assignments
+    ]
+    
+    faculty = Faculty(
+        id=faculty_obj.id,
+        name=faculty_obj.name,
+        email=faculty_obj.email,
+        employee_id=faculty_obj.employee_id,
+        assignments=assignments_list
+    )
+    
+    return LoginResponse(token=token, faculty=faculty)
 
 @app.get("/api/faculty/me", response_model=Faculty)
 async def get_faculty_info(current_faculty: Faculty = Depends(get_current_faculty)):
@@ -275,7 +193,8 @@ async def get_faculty_info(current_faculty: Faculty = Depends(get_current_facult
 async def get_students_with_marks(
     class_name: str,
     subject: str,
-    current_faculty: Faculty = Depends(get_current_faculty)
+    current_faculty: Faculty = Depends(get_current_faculty),
+    session: AsyncSession = Depends(get_db)
 ):
     # Check if faculty is assigned to this class-subject combination
     is_assigned = any(
@@ -290,32 +209,60 @@ async def get_students_with_marks(
         )
     
     # Get students enrolled in this subject for this class
-    students_cursor = db.students.find({
-        "class_name": class_name,
-        "enrolled_subjects": subject
-    })
-    students = await students_cursor.to_list(length=None)
+    result = await session.execute(
+        select(StudentModel).filter(
+            StudentModel.class_name == class_name,
+            StudentModel.enrollments.any(StudentEnrollmentModel.subject == subject)
+        )
+    )
+    students_list = result.scalars().all()
     
     # Get marks for these students
-    result = []
-    for student in students:
-        marks = await db.marks.find_one({
-            "student_id": student["id"],
-            "class_name": class_name,
-            "subject": subject
-        })
+    result_list = []
+    for student in students_list:
+        marks_result = await session.execute(
+            select(MarksModel).filter(
+                MarksModel.student_id == student.id,
+                MarksModel.class_name == class_name,
+                MarksModel.subject == subject
+            )
+        )
+        marks_obj = marks_result.scalars().first()
         
-        result.append(StudentWithMarks(
-            student=Student(**student),
-            marks=Marks(**marks) if marks else None
-        ))
+        # Convert student to Pydantic model
+        enrolled_subjects = [e.subject for e in student.enrollments]
+        student_pydantic = Student(
+            id=student.id,
+            name=student.name,
+            student_id=student.student_id,
+            class_name=student.class_name,
+            enrolled_subjects=enrolled_subjects
+        )
+        
+        # Convert marks to Pydantic model if exists
+        marks_pydantic = None
+        if marks_obj:
+            marks_pydantic = Marks(
+                id=marks_obj.id,
+                student_id=marks_obj.student_id,
+                class_name=marks_obj.class_name,
+                subject=marks_obj.subject,
+                faculty_email=marks_obj.faculty_email,
+                ct1=float(marks_obj.ct1) if marks_obj.ct1 else None,
+                insem=float(marks_obj.insem) if marks_obj.insem else None,
+                ct2=float(marks_obj.ct2) if marks_obj.ct2 else None,
+                total=float(marks_obj.total) if marks_obj.total else None
+            )
+        
+        result_list.append(StudentWithMarks(student=student_pydantic, marks=marks_pydantic))
     
-    return result
+    return result_list
 
 @app.post("/api/marks")
 async def save_marks(
     marks_update: MarksUpdate,
-    current_faculty: Faculty = Depends(get_current_faculty)
+    current_faculty: Faculty = Depends(get_current_faculty),
+    session: AsyncSession = Depends(get_db)
 ):
     # Check if faculty is assigned to this class-subject combination
     is_assigned = any(
@@ -347,11 +294,14 @@ async def save_marks(
         total += marks_update.ct2
     
     # Check if marks already exist
-    existing_marks = await db.marks.find_one({
-        "student_id": marks_update.student_id,
-        "class_name": marks_update.class_name,
-        "subject": marks_update.subject
-    })
+    existing_marks_result = await session.execute(
+        select(MarksModel).filter(
+            MarksModel.student_id == marks_update.student_id,
+            MarksModel.class_name == marks_update.class_name,
+            MarksModel.subject == marks_update.subject
+        )
+    )
+    existing_marks = existing_marks_result.scalars().first()
     
     marks_data = {
         "student_id": marks_update.student_id,
@@ -366,18 +316,27 @@ async def save_marks(
     
     if existing_marks:
         # Update existing marks
-        await db.marks.update_one(
-            {"id": existing_marks["id"]},
-            {"$set": marks_data}
-        )
-        marks_data["id"] = existing_marks["id"]
+        existing_marks.ct1 = marks_update.ct1
+        existing_marks.insem = marks_update.insem
+        existing_marks.ct2 = marks_update.ct2
+        existing_marks.total = total
+        await session.commit()
+        marks_data["id"] = existing_marks.id
     else:
         # Create new marks entry
         marks_data["id"] = str(uuid4())
-        await db.marks.insert_one(marks_data)
+        new_marks = MarksModel(**marks_data)
+        session.add(new_marks)
+        await session.commit()
     
     return {"message": "Marks saved successfully", "marks": marks_data}
 
 @app.get("/api/health")
 async def health_check():
     return {"status": "healthy"}
+
+# Import models with different names to avoid conflict with Pydantic models
+from db_mysql import Faculty as FacultyModel
+from db_mysql import Student as StudentModel
+from db_mysql import StudentEnrollment as StudentEnrollmentModel
+from db_mysql import Marks as MarksModel

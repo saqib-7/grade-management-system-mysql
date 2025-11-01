@@ -1,3 +1,8 @@
+fastapi
+
+fastapi
+uvicorn
+
 annotated-types==0.7.0
 anyio==4.11.0
 bcrypt==4.1.3
